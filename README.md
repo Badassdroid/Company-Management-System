@@ -1,4 +1,6 @@
-# Company Management System
+# Company-Management-System
+
+Company Management System
 
 See [DEPLOYMENT.md](./DEPLOYMENT.md) for publishing the Flask API to Render and the React frontend to Vercel from GitHub.
 
