@@ -29,4 +29,6 @@ export async function api(path, { token, ...options } = {}) {
 
 export function jsonRequest(method, value) {
   return { method, body: JSON.stringify(value) }
+
+
 }
