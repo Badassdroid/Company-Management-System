@@ -8,18 +8,27 @@ export async function api(path, { token, ...options } = {}) {
   }
   if (token) headers.set('Authorization', `Bearer ${token}`)
 
+  const url = `${API_BASE_URL}${path}`
   let response
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers })
-  } catch {
-    throw new Error('Could not reach the API. Check that the Flask backend is running.')
+    response = await fetch(url, { ...options, headers })
+  } catch (error) {
+    const reason = error instanceof Error ? ` ${error.message}` : ''
+    throw new Error(`Could not reach API: ${url}.${reason}`)
   }
 
+  const responseText = await response.text()
   let payload
   try {
-    payload = await response.json()
+    payload = JSON.parse(responseText)
   } catch {
-    throw new Error(`The API returned an invalid response (${response.status}).`)
+    console.error('Invalid API response:', {
+      url,
+      responseUrl: response.url,
+      status: response.status,
+      contentType: response.headers.get('content-type'),
+    })
+    throw new Error(`API returned non-JSON (${response.status}) from ${url}. Check browser console.`)
   }
   if (!response.ok || payload.success === false) {
     throw new Error(payload.message || `Request failed (${response.status}).`)
