@@ -1,0 +1,17 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Flask app",
+			"type": "shell",
+			"command": "venv/bin/flask",
+			"args": [
+				"--debug",
+				"run",
+				"--host=0.0.0.0"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}
