@@ -60,6 +60,11 @@ def get_json():
     return request.get_json(silent=True) or {}
 
 
+def maybe_single_data(query):
+    result = query.execute()
+    return result.data if result is not None else None
+
+
 def require_auth(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -76,14 +81,12 @@ def require_auth(fn):
             if not user:
                 return fail("Invalid or expired token.", 401)
 
-            profile_result = (
+            profile = maybe_single_data(
                 db.table("user_profiles")
                 .select("user_id, employee_id, role, is_active")
                 .eq("user_id", user.id)
                 .maybe_single()
-                .execute()
             )
-            profile = getattr(profile_result, "data", None)
             if not profile or not profile.get("is_active"):
                 return fail("Your account is inactive or has no employee profile.", 403)
 
@@ -137,19 +140,18 @@ def provision_employee_account(employee):
     if employee.get("employment_status") != "active":
         raise ValueError("Only active employees can be invited to sign in.")
 
-    existing_link = (
+    existing_link = maybe_single_data(
         db.table("user_profiles")
         .select("user_id, role")
         .eq("employee_id", employee["id"])
         .maybe_single()
-        .execute()
     )
-    if existing_link.data:
-        if existing_link.data.get("role") != "employee":
+    if existing_link:
+        if existing_link.get("role") != "employee":
             raise ValueError("This employee is linked to a non-employee Supabase account.")
         db.table("user_profiles").update({
             "is_active": True,
-        }).eq("user_id", existing_link.data["user_id"]).execute()
+        }).eq("user_id", existing_link["user_id"]).execute()
         return {"linked": True, "invited": False}
 
     user = auth_user_by_email(email)
@@ -174,14 +176,12 @@ def provision_employee_account(employee):
     if not user_id:
         raise RuntimeError("Supabase did not return a user ID for this account.")
 
-    existing_profile = (
+    profile = maybe_single_data(
         db.table("user_profiles")
         .select("user_id, employee_id, role")
         .eq("user_id", user_id)
         .maybe_single()
-        .execute()
     )
-    profile = existing_profile.data
     if profile:
         if profile.get("role") != "employee":
             raise ValueError("This Supabase account already has a non-employee role.")
@@ -268,10 +268,9 @@ def current_profile():
     try:
         employee = None
         if g.employee_id:
-            result = db.table("employees").select(
+            employee = maybe_single_data(db.table("employees").select(
                 "id, employee_number, first_name, last_name, email, department, job_title, employment_status"
-            ).eq("id", g.employee_id).maybe_single().execute()
-            employee = getattr(result, "data", None)
+            ).eq("id", g.employee_id).maybe_single())
 
         return ok({
             "user_id": g.user.id,
@@ -409,10 +408,12 @@ def get_employee(employee_id):
     if not employee_or_management_access(employee_id):
         return fail("You can only view your own employee record.", 403)
     try:
-        result = db.table("employees").select("*").eq("id", employee_id).maybe_single().execute()
-        if not result.data:
+        employee = maybe_single_data(
+            db.table("employees").select("*").eq("id", employee_id).maybe_single()
+        )
+        if not employee:
             return fail("Employee not found.", 404)
-        return ok(result.data)
+        return ok(employee)
     except Exception:
         return supabase_error("Could not retrieve employee.")
 
@@ -445,10 +446,12 @@ def create_employee():
 @management_only
 def create_employee_account(employee_id):
     try:
-        result = db.table("employees").select("*").eq("id", employee_id).maybe_single().execute()
-        if not result.data:
+        employee = maybe_single_data(
+            db.table("employees").select("*").eq("id", employee_id).maybe_single()
+        )
+        if not employee:
             return fail("Employee not found.", 404)
-        account = provision_employee_account(result.data)
+        account = provision_employee_account(employee)
         return ok(account, "Employee account is linked.")
     except ValueError as error:
         return fail(str(error), 400)
@@ -603,10 +606,10 @@ def assign_asset():
 def return_asset(assignment_id):
     data = get_json()
     try:
-        assignment = db.table("asset_assignments").select(
+        assignment = maybe_single_data(db.table("asset_assignments").select(
             "asset_id"
-        ).eq("id", assignment_id).eq("status", "active").maybe_single().execute()
-        if not assignment.data:
+        ).eq("id", assignment_id).eq("status", "active").maybe_single())
+        if not assignment:
             return fail("Active assignment not found.", 404)
         db.table("asset_assignments").update({
             "status": "returned",
@@ -616,7 +619,7 @@ def return_asset(assignment_id):
             "notes": data.get("notes")
         }).eq("id", assignment_id).execute()
         db.table("assets").update({"status": "available"}).eq(
-            "id", assignment.data["asset_id"]
+            "id", assignment["asset_id"]
         ).execute()
         return ok(message="Asset returned.")
     except Exception:
@@ -728,19 +731,19 @@ def assign_vehicle():
 def return_vehicle(assignment_id):
     data = get_json()
     try:
-        assignment = db.table("vehicle_assignments").select(
+        assignment = maybe_single_data(db.table("vehicle_assignments").select(
             "vehicle_id, employee_id, odometer_out_km"
-        ).eq("id", assignment_id).eq("status", "active").maybe_single().execute()
-        if not assignment.data:
+        ).eq("id", assignment_id).eq("status", "active").maybe_single())
+        if not assignment:
             return fail("Active vehicle assignment not found.", 404)
-        if g.role != "management" and assignment.data["employee_id"] != g.employee_id:
+        if g.role != "management" and assignment["employee_id"] != g.employee_id:
             return fail("You can only return a vehicle assigned to you.", 403)
 
         try:
             odometer_in = float(data.get("odometer_in_km"))
         except (TypeError, ValueError):
             return fail("A valid odometer_in_km is required.")
-        if odometer_in < float(assignment.data["odometer_out_km"]):
+        if odometer_in < float(assignment["odometer_out_km"]):
             return fail("A valid odometer_in_km is required.")
 
         fuel_gauge_in = data.get("fuel_gauge_in_percent")
@@ -763,7 +766,7 @@ def return_vehicle(assignment_id):
         db.table("vehicles").update({
             "status": "available",
             "current_odometer_km": odometer_in
-        }).eq("id", assignment.data["vehicle_id"]).execute()
+        }).eq("id", assignment["vehicle_id"]).execute()
         return ok(message="Vehicle returned.")
     except Exception:
         return supabase_error("Could not return vehicle.")
@@ -963,12 +966,11 @@ def my_leave_balance():
     if not employee_id:
         return fail("Employee account is not linked to an employee record.", 403)
     try:
-        result = db.table("leave_balances").select("*").eq(
+        row = maybe_single_data(db.table("leave_balances").select("*").eq(
             "employee_id", employee_id
-        ).maybe_single().execute()
-        if not result.data:
+        ).maybe_single())
+        if not row:
             return fail("No leave balance has been configured for this employee.", 404)
-        row = result.data
         return ok({
             **row,
             "days_remaining": float(row["annual_entitlement"]) - float(row["days_taken"])
@@ -989,11 +991,11 @@ def create_or_set_leave_balance():
         entitlement = float(entitlement)
         if entitlement < 0:
             return fail("annual_entitlement cannot be negative.")
-        existing = db.table("leave_balances").select("id").eq(
+        existing = maybe_single_data(db.table("leave_balances").select("id").eq(
             "employee_id", employee_id
-        ).maybe_single().execute()
+        ).maybe_single())
         payload = {"annual_entitlement": entitlement}
-        if existing.data:
+        if existing:
             result = db.table("leave_balances").update(payload).eq(
                 "employee_id", employee_id
             ).execute()
