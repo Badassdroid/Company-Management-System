@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import Sidebar from './components/Sidebar.jsx'
 import Topbar from './components/Topbar.jsx'
 import EmployeePortal from './pages/EmployeePortal.jsx'
@@ -8,14 +8,16 @@ import { AuthProvider } from './lib/auth.jsx'
 import { api } from './lib/api.js'
 import { useAuth } from './lib/useAuth.js'
 import SignIn from './components/SignIn.jsx'
+import SetPassword from './components/SetPassword.jsx'
 import './style.css'
 
 function AppLayout() {
   const { session, loading, signOut } = useAuth()
+  const location = useLocation()
   const [profileResult, setProfileResult] = useState(null)
 
   useEffect(() => {
-    if (!session) return undefined
+    if (!session || location.pathname === '/set-password') return undefined
 
     let active = true
     api('/me', { token: session.access_token })
@@ -25,10 +27,12 @@ function AppLayout() {
       })
 
     return () => { active = false }
-  }, [session])
+  }, [session, location.pathname])
 
   const hasCurrentProfile = profileResult?.token === session?.access_token
-  if (loading || (session && !hasCurrentProfile)) return <div className="loading-state full-page">Loading workspace…</div>
+  if (loading) return <div className="loading-state full-page">Loading workspace…</div>
+  if (location.pathname === '/set-password') return <SetPassword />
+  if (session && !hasCurrentProfile) return <div className="loading-state full-page">Loading workspace…</div>
   if (!session) return <SignIn />
   if (profileResult?.error) {
     return (

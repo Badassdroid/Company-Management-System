@@ -12,6 +12,7 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
 SUPABASE_PUBLIC_KEY = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_PUBLISHABLE_KEY")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "").rstrip("/")
 
 if not SUPABASE_URL:
     raise RuntimeError("SUPABASE_URL is missing from .env")
@@ -114,6 +115,97 @@ def employee_or_management_access(employee_id):
 def supabase_error(message="Database operation failed.", status=500):
     app.logger.exception(message)
     return fail(message, status)
+
+
+def auth_user_by_email(email):
+    page = 1
+    while True:
+        response = db.auth.admin.list_users(page=page, per_page=1000)
+        users = getattr(response, "users", response)
+        for user in users:
+            if (getattr(user, "email", "") or "").strip().lower() == email:
+                return user
+        if len(users) < 1000:
+            return None
+        page += 1
+
+
+def provision_employee_account(employee):
+    email = (employee.get("email") or "").strip().lower()
+    if not email:
+        raise ValueError("Add an email address to the employee record before creating a login.")
+    if employee.get("employment_status") != "active":
+        raise ValueError("Only active employees can be invited to sign in.")
+
+    existing_link = (
+        db.table("user_profiles")
+        .select("user_id, role")
+        .eq("employee_id", employee["id"])
+        .maybe_single()
+        .execute()
+    )
+    if existing_link.data:
+        if existing_link.data.get("role") != "employee":
+            raise ValueError("This employee is linked to a non-employee Supabase account.")
+        db.table("user_profiles").update({
+            "is_active": True,
+        }).eq("user_id", existing_link.data["user_id"]).execute()
+        return {"linked": True, "invited": False}
+
+    user = auth_user_by_email(email)
+    invited = False
+    if not user:
+        if not FRONTEND_URL:
+            raise RuntimeError("Set FRONTEND_URL on the API service before sending account invitations.")
+        response = db.auth.admin.invite_user_by_email(
+            email,
+            options={
+                "data": {
+                    "first_name": employee.get("first_name"),
+                    "last_name": employee.get("last_name"),
+                },
+                "redirect_to": f"{FRONTEND_URL}/set-password",
+            },
+        )
+        user = getattr(response, "user", None)
+        invited = True
+
+    user_id = getattr(user, "id", None)
+    if not user_id:
+        raise RuntimeError("Supabase did not return a user ID for this account.")
+
+    existing_profile = (
+        db.table("user_profiles")
+        .select("user_id, employee_id, role")
+        .eq("user_id", user_id)
+        .maybe_single()
+        .execute()
+    )
+    profile = existing_profile.data
+    if profile:
+        if profile.get("role") != "employee":
+            raise ValueError("This Supabase account already has a non-employee role.")
+        if profile.get("employee_id") not in (None, employee["id"]):
+            raise ValueError("This Supabase account is already linked to another employee.")
+        db.table("user_profiles").update({
+            "employee_id": employee["id"],
+            "is_active": True,
+        }).eq("user_id", user_id).execute()
+    else:
+        db.table("user_profiles").insert({
+            "user_id": user_id,
+            "employee_id": employee["id"],
+            "role": "employee",
+            "is_active": True,
+        }).execute()
+
+    return {"linked": True, "invited": invited}
+
+
+def set_employee_account_active(employee_id, is_active):
+    db.table("user_profiles").update({
+        "is_active": is_active,
+    }).eq("employee_id", employee_id).execute()
 
 
 @app.errorhandler(404)
@@ -296,7 +388,17 @@ def dashboard():
 def list_employees():
     try:
         result = db.table("employees").select("*").order("created_at", desc=True).execute()
-        return ok(result.data or [])
+        profiles = db.table("user_profiles").select("employee_id").execute()
+        linked_employee_ids = {
+            profile["employee_id"]
+            for profile in (profiles.data or [])
+            if profile.get("employee_id")
+        }
+        employees = [
+            {**employee, "has_account": employee["id"] in linked_employee_ids}
+            for employee in (result.data or [])
+        ]
+        return ok(employees)
     except Exception:
         return supabase_error("Could not retrieve employees.")
 
@@ -328,11 +430,34 @@ def create_employee():
         "department", "job_title", "employment_status", "start_date", "end_date"
     ]
     payload = {key: data[key] for key in allowed if key in data}
+    if "email" in payload and payload["email"] is not None:
+        if not isinstance(payload["email"], str):
+            return fail("Email address must be text.")
+        payload["email"] = payload["email"].strip().lower() or None
     try:
         result = db.table("employees").insert(payload).execute()
         return ok(result.data[0] if result.data else None, "Employee created.", 201)
     except Exception:
         return supabase_error("Could not create employee. Check unique employee number/email.")
+
+
+@app.post("/api/employees/<employee_id>/account")
+@management_only
+def create_employee_account(employee_id):
+    try:
+        result = db.table("employees").select("*").eq("id", employee_id).maybe_single().execute()
+        if not result.data:
+            return fail("Employee not found.", 404)
+        account = provision_employee_account(result.data)
+        return ok(account, "Employee account is linked.")
+    except ValueError as error:
+        return fail(str(error), 400)
+    except Exception:
+        app.logger.exception("Could not provision employee account.")
+        return fail(
+            "Could not create or link the employee account. Check Supabase Auth email settings and the invitation redirect URL.",
+            502,
+        )
 
 
 @app.patch("/api/employees/<employee_id>")
@@ -349,6 +474,11 @@ def update_employee(employee_id):
         result = db.table("employees").update(payload).eq("id", employee_id).execute()
         if not result.data:
             return fail("Employee not found.", 404)
+        if "employment_status" in payload:
+            set_employee_account_active(
+                employee_id,
+                payload["employment_status"] == "active",
+            )
         return ok(result.data[0], "Employee updated.")
     except Exception:
         return supabase_error("Could not update employee.")
@@ -365,6 +495,7 @@ def deactivate_employee(employee_id):
         }).eq("id", employee_id).execute()
         if not result.data:
             return fail("Employee not found.", 404)
+        set_employee_account_active(employee_id, False)
         return ok(result.data[0], "Employee deactivated.")
     except Exception:
         return supabase_error("Could not deactivate employee.")

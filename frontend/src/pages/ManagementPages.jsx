@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ArrowRight, Boxes, CarFront, Check, Package, Pencil, RotateCcw, UserX, Users, X } from 'lucide-react'
+import { ArrowRight, Boxes, CarFront, Check, Package, Pencil, RotateCcw, UserPlus, UserX, Users, X } from 'lucide-react'
 import { Link, useParams } from 'react-router-dom'
 import StatCard from '../components/StatCard.jsx'
 import {
@@ -79,8 +79,9 @@ function usePageActions(refresh) {
 
   async function mutate(path, method, payload) {
     setActionError('')
-    await api(path, { token: session.access_token, ...jsonRequest(method, payload) })
+    const result = await api(path, { token: session.access_token, ...jsonRequest(method, payload) })
     refresh()
+    return result
   }
 
   return { dialog, setDialog, actionError, setActionError, mutate }
@@ -201,11 +202,22 @@ export function EmployeesPage() {
   const { data, loading, error, refresh } = useApiData({ employees: loadEmployees })
   const employees = data.employees || []
   const actions = usePageActions(refresh)
-  const submitForm = (payload) => actions.mutate(
-    actions.dialog.record ? `/employees/${actions.dialog.record.id}` : '/employees',
-    actions.dialog.record ? 'PATCH' : 'POST',
-    payload,
-  )
+  async function submitForm(payload) {
+    if (actions.dialog.record) {
+      await actions.mutate(`/employees/${actions.dialog.record.id}`, 'PATCH', payload)
+      return
+    }
+
+    const employee = await actions.mutate('/employees', 'POST', payload)
+    if (employee.email && employee.employment_status === 'active') {
+      try {
+        await actions.mutate(`/employees/${employee.id}/account`, 'POST')
+      } catch (accountError) {
+        actions.setActionError(`Employee added, but account setup failed: ${accountError.message}`)
+      }
+    }
+    refresh()
+  }
 
   async function deactivate(employee) {
     if (!window.confirm(`Deactivate ${employee.first_name} ${employee.last_name}?`)) return
@@ -216,9 +228,17 @@ export function EmployeesPage() {
     }
   }
 
+  async function createLogin(employee) {
+    try {
+      await actions.mutate(`/employees/${employee.id}/account`, 'POST')
+    } catch (accountError) {
+      actions.setActionError(accountError.message)
+    }
+  }
+
   return (
     <>
-      <ManagementPage eyebrow="PEOPLE" title="Employee management" description="Add, edit, deactivate and view employee records." loading={loading} error={error} refresh={refresh}
+      <ManagementPage eyebrow="PEOPLE" title="Employee management" description="Add employees and manage their company sign-in accounts." loading={loading} error={error} refresh={refresh}
         action={<AddButton onClick={() => actions.setDialog({ title: 'Add employee', fields: employeeFields })}>Add employee</AddButton>}>
         <PageError>{actions.actionError}</PageError>
         <section className="panel management-panel">
@@ -230,12 +250,14 @@ export function EmployeesPage() {
               { key: 'department', label: 'Department' },
               { key: 'job_title', label: 'Job title' },
               { key: 'email', label: 'Email' },
+              { key: 'has_account', label: 'Login', render: (row) => row.has_account ? 'Linked' : 'Not linked' },
               { key: 'employment_status', label: 'Status', render: (row) => <StatusBadge>{row.employment_status}</StatusBadge> },
               {
                 key: 'actions', label: 'Actions', render: (row) => (
                   <div className="row-actions">
                     <Link className="icon-button" title="View employee" aria-label="View employee" to={`/employees/${row.id}`}><ArrowRight size={15} /></Link>
                     <button className="icon-button" title="Edit employee" aria-label="Edit employee" type="button" onClick={() => actions.setDialog({ title: 'Edit employee', fields: employeeFields, initial: row, record: row })}><Pencil size={15} /></button>
+                    {!row.has_account && row.email && row.employment_status === 'active' && <button className="icon-button" title="Create or link login" aria-label={`Create or link login for ${row.first_name} ${row.last_name}`} type="button" onClick={() => createLogin(row)}><UserPlus size={15} /></button>}
                     {row.employment_status === 'active' && <button className="icon-button danger-icon" title="Deactivate employee" aria-label="Deactivate employee" type="button" onClick={() => deactivate(row)}><UserX size={15} /></button>}
                   </div>
                 )

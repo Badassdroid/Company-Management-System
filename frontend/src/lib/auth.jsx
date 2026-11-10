@@ -49,6 +49,12 @@ export function AuthProvider({ children }) {
       if (error) throw error
       setSession(data.session)
     },
+    updatePassword: async (password) => {
+      if (!isSupabaseConfigured) throw new Error('Supabase sign-in is not configured.')
+      const supabase = await getSupabaseClient()
+      const { error } = await supabase.auth.updateUser({ password })
+      if (error) throw error
+    },
     signOut: async () => {
       if (!isSupabaseConfigured) return
       const supabase = await getSupabaseClient()
